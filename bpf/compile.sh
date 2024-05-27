@@ -1,0 +1,1 @@
+clang-15 -O2 -g -Wall -target bpf -c kern.c -o kern.o
