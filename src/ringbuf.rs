@@ -1,4 +1,4 @@
-use crate::assert::{expect_or_error, ExpectNonNullPtr};
+use crate::assert::{unsafe_no_panic, ExpectNonNullPtr};
 use crate::utility::{page_size, AlignUp};
 use crate::{Error, Result};
 use futures::ready;
@@ -59,38 +59,28 @@ impl<'a> Ringbuf<'a> {
             .info
             .max_entries;
         let mask = max_entries.checked_sub(1).expect("ring buf was empty") as usize;
-        let page_size = unsafe { page_size()? as usize };
+        let page_size = unsafe { page_size()? };
         let mmap_sz: usize = page_size + 2 * (max_entries as usize);
 
-        let consumer = unsafe {
-            expect_or_error(
-                ExpectNonNullPtr,
-                mmap(
-                    null_mut(),
-                    page_size,
-                    PROT_READ | PROT_WRITE,
-                    MAP_SHARED,
-                    map.as_fd().as_raw_fd(),
-                    0,
-                ),
-                Error::ConsumerMmap,
-            )?
-        };
+        let consumer = unsafe_no_panic!(mmap(
+            null_mut(),
+            page_size,
+            PROT_READ | PROT_WRITE,
+            MAP_SHARED,
+            map.as_fd().as_raw_fd(),
+            0,
+        ))
+        .expect(ExpectNonNullPtr, Error::ConsumerMmap)?;
 
-        let producer = unsafe {
-            expect_or_error(
-                ExpectNonNullPtr,
-                mmap(
-                    null_mut(),
-                    mmap_sz,
-                    PROT_READ,
-                    MAP_SHARED,
-                    map.as_fd().as_raw_fd(),
-                    page_size as _,
-                ),
-                Error::ProducerMmap,
-            )?
-        };
+        let producer = unsafe_no_panic!(mmap(
+            null_mut(),
+            mmap_sz,
+            PROT_READ,
+            MAP_SHARED,
+            map.as_fd().as_raw_fd(),
+            page_size as _,
+        ))
+        .expect(ExpectNonNullPtr, Error::ProducerMmap)?;
 
         Ok(Self::new(map.as_fd(), mask, consumer, producer, unsafe {
             producer.add(page_size)

@@ -8,9 +8,14 @@ pub mod utility;
 #[derive(Debug)]
 enum Error {
     InterfaceInvalid,
+    Overflow,
     InvalidUmem,
-    PageSize,
+    UnalignedUmem,
+    PageSizeInvalid,
+    SocketFdInvalid,
     Allocate,
+    UmemReg,
+    UmemRegFillRing,
     WrongMapType,
     ConsumerMmap,
     ProducerMmap,

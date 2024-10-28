@@ -11,11 +11,13 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::Path;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use warp::Filter;
 use xdp::ringbuf::Ringbuf;
-use xdp::utility::ifindex;
+use xdp::utility::{ifindex, split_array};
 
 type Interface = u32;
 
@@ -49,8 +51,11 @@ impl Display for AddressType {
 
 impl Address {
     fn from_octets(octets: [u8; 24]) -> Self {
-        let ifindex = u32::from_le_bytes(octets[0..4].try_into().unwrap());
-        let kind = u32::from_le_bytes(octets[4..8].try_into().unwrap());
+        let (ifindex, octets): ([u8; 4], [u8; 20]) = split_array(octets);
+        let ifindex = u32::from_le_bytes(ifindex);
+
+        let (kind, octets): ([u8; 4], [u8; 16]) = split_array(octets);
+        let kind = u32::from_le_bytes(kind);
 
         let kind = match kind {
             0 => AddrType::IPV4,
@@ -60,10 +65,10 @@ impl Address {
 
         let address = match kind {
             AddrType::IPV4 => AddressType::Ipv4(<Ipv4Addr as From<[u8; 4]>>::from(
-                octets[8..12].try_into().unwrap(),
+                octets[0..4].try_into().unwrap(),
             )),
             AddrType::IPv6 => AddressType::Ipv6(<Ipv6Addr as From<[u8; 16]>>::from(
-                octets[8..24].try_into().unwrap(),
+                octets[0..16].try_into().unwrap(),
             )),
         };
 
@@ -130,9 +135,40 @@ impl Bpf {
     }
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 struct Log {
-    inner: Mutex<HashMap<Address, u64>>,
+    inner: Arc<Mutex<HashMap<Address, (u64, SystemTime)>>>,
+    task: JoinHandle<()>,
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        let arc = Default::default();
+        Log {
+            inner: Arc::clone(&arc),
+            task: tokio::task::spawn(async move {
+                loop {
+                    {
+                        let mut lock = arc.lock().await;
+                        let now = SystemTime::now();
+
+                        lock.retain(|_, (_, updated)| {
+                            now.duration_since(*updated).unwrap()
+                                < Duration::from_secs(60 * 60 * 24 * 7)
+                        });
+                    }
+
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }),
+        }
+    }
+}
+
+impl Drop for Log {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 impl Log {
@@ -141,10 +177,12 @@ impl Log {
 
         match lock.entry(address) {
             Entry::Occupied(mut addr) => {
-                *addr.get_mut() += 1;
+                let (count, time) = addr.get_mut();
+                *count += 1;
+                *time = SystemTime::now();
             }
             Entry::Vacant(addr) => {
-                addr.insert(1);
+                addr.insert((1, SystemTime::now()));
             }
         }
     }
@@ -154,7 +192,7 @@ impl Log {
 
         let lock = self.inner.lock().await;
 
-        for (address, packets) in lock.iter() {
+        for (address, (packets, _)) in lock.iter() {
             let opts = Opts::new("packets", "Number of packets")
                 .const_label("address", format!("{}", address.address))
                 .const_label("ifindex", format!("{}", address.ifindex));
